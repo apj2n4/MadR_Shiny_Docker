@@ -1,0 +1,304 @@
+---
+title: "Loan Default Prediction"
+author: "Arun Janakiraman"
+date: "9/9/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Loan Default Data Wrangling
+
+This rmarkdown document is an attempt to wrangle and fit a simple logistic regression model to Lending club loan dataset to predict the default rate of the loan (https://www.kaggle.com/wendykan/lending-club-loan-data). Other machine learning models can be easily fit to the dataset but I chose the simplest logistic regression to illustrate the entire process of wrangling data to productionizing the model. The dataset has been updated since I started working on this project so the some of the column names might not match. I can pass along the dataset I used in this project, but it is a relatively large file (431 MB).
+
+I use dplyr package in this project to read and modify the dataset. ggplot2 will be used for some visualization. The goal is to create a simplified dataset, by removing NAs and variable which are irrelevant to the problem at hand, that is predicting the probabililty of loan defaults.
+
+```{r load libraries,echo=FALSE,warning=FALSE,message=FALSE}
+library(tidyverse)
+library(purrr)
+#library(tictoc)
+library(lubridate)
+
+#A simple function to convert string dates to dates to numeric
+convert_date = function(x){
+  x = paste(x,'-1')
+  x = myd(x)
+  x = as.numeric(x)
+  return(x)
+}
+```
+
+###Load and view the dataset
+```{r}
+df <- read_csv('loan.csv')
+```
+An overview of all the columns and their types.
+```{r}
+df %>% glimpse()
+```
+
+###Remove NAs
+
+```{r Remove NAs, echo=FALSE}
+df_NA <- df %>% 
+  select_if(function(x) any(is.na(x))) %>% 
+  summarise_each(funs(sum(is.na(.)))) %>% 
+  select_if(function(x) any(x>400000))
+df_NA %>% glimpse()
+```
+
+Removing all NAs and assigning the results to a new data frame
+```{r}
+df_new <- df %>% 
+  select(-c(colnames(df_NA)))
+
+```
+
+Some more columns were deleted as some of them were not suitable for creating the model
+```{r}
+df_new <- df_new %>% 
+  select(-c(funded_amnt_inv,
+            id,
+            member_id,
+            url,
+            zip_code,
+            emp_title,
+            title,
+            addr_state,
+            policy_code,
+            pymnt_plan,
+            acc_now_delinq,
+            collections_12_mths_ex_med,
+            collection_recovery_fee,
+            delinq_2yrs,
+            recoveries,
+            out_prncp_inv,
+            total_pymnt_inv,
+            total_rec_prncp,
+            pub_rec,
+            application_type,
+            total_rec_late_fee,
+            last_pymnt_d,
+            next_pymnt_d,
+            earliest_cr_line,
+            funded_amnt,
+            sub_grade))
+```
+
+The numher of columns reduced from 74 to 23 after the elimination of irrelavent variables
+```{r}
+df_new %>% glimpse()
+```
+The loan default variable has many categories. To keep things simple, the number of categories is reduced to 2 - binary classification. The two states are Loan won't default or it will.
+```{r}
+df_new <- df_new %>% 
+  mutate(loan_status = ifelse((loan_status !='Fully Paid' & loan_status !='Issued' & loan_status != 'Current'),'Default','Good'))
+```
+
+
+Creation of a new variable - Days elasped after issuance of loan to first credit inquiry
+```{r}
+df_new <- df_new %>% 
+  mutate(last_credit_pull_d = convert_date(last_credit_pull_d),
+         issue_d = convert_date(issue_d),
+         score_days_interval = last_credit_pull_d - issue_d)
+```
+Reduce home ownership 
+```{r}
+df_new %>% glimpse()
+```
+```{r}
+df_new %>% select(home_ownership) %>% unique()
+```
+To simplify the analysis OTHER, NONE and ANY Levels were removed.
+
+```{r}
+df_new <- df_new %>% 
+  filter(home_ownership!='NONE' & 
+         home_ownership!='ANY' &
+         home_ownership!='OTHER')
+```
+
+Conversion of all characters into factors
+```{r}
+df_new <- df_new %>% 
+  mutate(loan_status = as.factor(loan_status),
+         term = as.factor(term),
+         grade = as.factor(grade),
+         emp_length = as.factor(emp_length),
+         home_ownership = as.factor(home_ownership),
+         verification_status = as.factor(verification_status),
+         purpose = as.factor(purpose)) %>% 
+  drop_na()
+```
+
+```{r}
+df_new %>% glimpse()
+```
+Removing date variables
+```{r}
+df_new <- df_new %>% 
+  select(-c(issue_d,
+            last_credit_pull_d))
+```
+
+
+Save the reduced dataset in a RDS
+```{r}
+loan_cleaned <- saveRDS(df_new,file = "loan_cleaned_RMD.rds")
+```
+
+Some EDA on the reduced dataset
+```{r,fig.cap="Boxplot of Interest Rate "}
+ggplot(df_new,aes(y=int_rate,fill=loan_status)) +
+  geom_boxplot() + 
+  labs(y="Interest Rate %")
+```
+```{r}
+ggplot(df_new,aes(y=score_days_interval,fill=loan_status))+
+  geom_boxplot() + 
+  labs(title="Number of Days elasped between loan issuance and first credit pull")
+```
+```{r}
+ggplot(df_new,aes(y=loan_amnt,fill=loan_status))+
+  geom_boxplot() + 
+  labs(y='Loan Amount ($)')
+```
+```{r}
+ggplot(df_new,aes(y=installment,fill=loan_status))+
+  geom_boxplot()+
+  labs(y='Installment Amount ($)')
+```
+Finally the laon status response variable is highly imbalanced as shown below. Hence the performance of any classification algorithm should be evaluated using the area under the ROC curve. 
+```{r}
+ggplot(df_new,aes(x = loan_status,fill=loan_status)) +
+  geom_bar() + 
+  labs(title = 'Class Imbalance in the Response Variable')
+```
+
+##Fitting a simple logistic regression model
+
+Read the cleaned dataset into a new data frame. Since the dataset is large (over 700K rows) for this demonstration, I sampled 20000 rows randomly. 
+
+```{r}
+set.seed(123)
+df_new <- readRDS(file = 'loan_cleaned_RMD.rds')
+df_sample <- df_new %>% 
+  sample_n(size = 20000)
+```
+
+The probability of default using a logistic regression model is given as follows (sigmoid function)
+$$p(Default) = \frac{e^{\beta_0 + \beta_1x_1 + ..+ \beta_nx_n}}{1+e^{\beta_0 + \beta_1x_1 + ..+ \beta_nx_n}}$$
+where $x_1 \; to \;x_n$ are the explanatory variables in the dataset
+
+The coefficients $\beta_0 \; to\; \beta_n$ are estimated using the maximum liklihood function using tries to minimize the error between predicted probability to the observed probability (in this case of loan default). The likihood function is given below.
+$$l(\beta_0,\beta_1,..,\beta_n)\;=\;\prod_{i:y_i=1}{p(x_i)\prod_{i':y'_i=0}{(1-p(x'_i))}}$$ 
+Finding the value of $\beta's$ which maximizes this function is what the glm function in R does (with binomial family)
+
+Train and test  split of the dataset
+```{r}
+df_sample <- df_sample %>% 
+  mutate(id=row_number())
+
+df_sample_train = df_sample %>% 
+  sample_frac(0.7)
+
+df_sample_test = anti_join(df_sample,df_sample_train,by='id')
+
+# Remove row ids
+df_sample_train <- df_sample_train %>% 
+  select(-c(id))
+
+df_sample_test <- df_sample_test %>% 
+  select(-c(id))
+```
+
+The full logistic regression model (without any interaction terms)
+```{r}
+logistic1 <- glm(data = df_sample_train,formula = loan_status~.,family = 'binomial' )
+summary(logistic1)
+```
+A lot of the variables don't have any significant contribution (based on p values) to the probability of loan default. So those variables can be removed from the model. But before that lets take a look at some test set performance metrics
+
+```{r}
+logistic1.prob = predict(logistic1,newdata = df_sample_test,type = 'response')
+
+df_sample_test <- df_sample_test %>% 
+  mutate(prob1 = logistic1.prob) %>% 
+  mutate(loan_status_predicted = ifelse(prob1 < 0.5,"Default","Good")) %>% 
+  mutate(loan_status_predicted = as.factor(loan_status_predicted))
+```
+
+Overall classification accuracy
+```{r}
+df_sample_test %>% summarize(mean(loan_status==loan_status_predicted))
+```
+
+Confusion Matrix (Rows -  Predictions, Columns - Actual values). As seen below 
+```{r}
+table(df_sample_test$loan_status_predicted,df_sample_test$loan_status)
+```
+
+Area under the ROC (Reciever Operator Characteristic) curve
+```{r}
+library(pROC)
+roc1 <- roc(response=df_sample_test$loan_status,predictor = df_sample_test$prob1)
+print(roc1$auc)
+```
+
+```{r}
+ggroc(roc1, alpha = 0.5, colour = "red", linetype = 1, size = 1) +
+   geom_segment(aes(x = 1, xend = 0, y = 0, yend = 1), color="black", linetype="dashed",size=1) + 
+   labs(x='Specifivity',y='Sensivity',
+        title = "Model 1 ROC Curve")
+```
+
+A more parsimonious model (Model 2). Model 2 only has all of the significant variables.
+```{r}
+log2 <- (loan_status~loan_amnt + term + int_rate + installment + 
+           inq_last_6mths + out_prncp + total_pymnt + total_rec_int + last_pymnt_amnt + score_days_interval)
+
+logistic2 <- glm(data = df_sample_train,formula = log2,family = 'binomial')
+
+summary(logistic2)
+```
+
+Model performance metric with AUC. Not much improvement, but the model is simpler with fewer input variables.
+```{r}
+logistic2.prob = predict(logistic2,newdata = df_sample_test,type = 'response')
+df_sample_test <- df_sample_test %>% 
+  mutate(prob2 = logistic1.prob) %>% 
+  mutate(loan_status_predicted2 = ifelse(prob2 < 0.5,"Default","Good")) %>% 
+  mutate(loan_status_predicted2 = as.factor(loan_status_predicted))
+roc2 <- roc(response=df_sample_test$loan_status,predictor = df_sample_test$prob2)
+print(roc2$auc)
+```
+Saving the simpler model as a RDS file
+```{r}
+saveRDS(object =logistic2 ,file ="Logistic2_rmd.rds" )
+```
+
+
+Dockerizing the Shiny App.
+Refer https://www.bjoern-hartmann.de/post/learn-how-to-dockerize-a-shinyapp-in-7-steps/ as most of the procedure is from that url (Thanks Bjoern Hartman)
+<br>
+Need a linux OS for creating and the docker image. If on Windows can use Virtual Box
+<br>
+1. Install Virtual Box and Linux OS (I used Ubuntu 18.07 LTS Desktop)
+<br>
+2. Install Docker Community Edition
+<br>
+3. Download all the files as described in the above URL.
+<br>
+4. Build the Docker image (docker build -t [Image_Name] .)
+<br>
+5. Run the image from the specified port (docker run -p 80:80 [Image_Name])
+<br>
+6. I deployed the Docker image onto a Digital Ocean Linux server (cheapest is $5/month)
+<br>
+7. Installed Docker Community edition.
+<br>
+8. Run the image on the server for everyone to access.
+
