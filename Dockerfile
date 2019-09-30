@@ -27,12 +27,22 @@ RUN R -e "install.packages(c('shiny', 'shinydashboard','pROC'), repos='http://cr
 COPY shiny-server.conf  /etc/shiny-server/shiny-server.conf
 COPY /app /srv/shiny-server/
 
+# Make all app files readable
+RUN chmod -R +r /srv/shiny-server/
+
 # Make the ShinyApp available at port 80
 EXPOSE 80
 
+# allow permission
+RUN sudo chown -R shiny:shiny /srv/shiny-server
+
 # Copy further configuration files into the Docker image
 COPY shiny-server.sh /usr/bin/shiny-server.sh
+RUN ["chmod", "+x", "/usr/bin/shiny-server.sh"]
 
 CMD ["/usr/bin/shiny-server.sh"]
+
+
+
 
 
